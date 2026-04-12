@@ -1,0 +1,165 @@
+// Copyright (c) 2017-2020 Xiamen Yaji Software Co., Ltd.
+CCEffect %{
+techniques:
+  - passes:
+      - vert: sprite-vs:vert
+        frag: sprite-fs:frag
+        depthStencilState:
+          depthTest: false
+          depthWrite: false
+        blendState:
+          targets:
+            - blend: true
+              blendSrc: src_alpha
+              blendDst: one_minus_src_alpha
+              blendDstAlpha: one_minus_src_alpha
+        rasterizerState:
+          cullMode: none
+        properties:
+          alphaThreshold: { value: 0.5 }
+          sliceParams: { value: [5.0, 6.0, 0.0, 0.0] }
+          edgeParams: { value: [0.0, 0.0, 0.0, 0.0] }
+          cornerParams: { value: [0.0, 0.0, 0.0, 0.0] }
+
+}%
+
+CCProgram sprite-vs %{
+precision highp float;
+#include <builtin/uniforms/cc-global>
+#if USE_LOCAL
+  #include <builtin/uniforms/cc-local>
+#endif
+#if SAMPLE_FROM_RT
+  #include <common/common-define>
+#endif
+in vec3 a_position;
+in vec2 a_texCoord;
+in vec4 a_color;
+
+out vec4 color;
+out vec2 uv0;
+
+vec4 vert() {
+  vec4 pos = vec4(a_position, 1);
+  
+  #if USE_LOCAL
+    pos = cc_matWorld * pos;
+  #endif
+  
+  #if USE_PIXEL_ALIGNMENT
+    pos = cc_matView * pos;
+    pos.xyz = floor(pos.xyz);
+    pos = cc_matProj * pos;
+  #else
+    pos = cc_matViewProj * pos;
+  #endif
+  
+  uv0 = a_texCoord;
+  #if SAMPLE_FROM_RT
+    CC_HANDLE_RT_SAMPLE_FLIP(uv0);
+  #endif
+  color = a_color;
+  
+  return pos;
+}
+}%
+
+CCProgram sprite-fs %{
+precision highp float;
+#include <builtin/internal/embedded-alpha>
+#include <builtin/internal/alpha-test>
+
+uniform Custom {
+  vec4 sliceParams;
+  vec4 edgeParams;
+  vec4 cornerParams;
+};
+
+in vec4 color;
+
+#if USE_TEXTURE
+  in vec2 uv0;
+  #pragma builtin(local)
+  layout(set = 2, binding = 12)uniform sampler2D cc_spriteTexture;
+#endif
+
+float linear(float x0, float x1, float y0, float y1, float inputX) {
+  return (y1 - y0) * (inputX - x0) / (x1 - x0) + y0;
+}
+
+vec4 frag() {
+  vec4 o = vec4(1, 1, 1, 1);
+  
+  #if USE_TEXTURE
+    
+    float xCount = sliceParams.x;
+    float yCount = sliceParams.y;
+    float xStep = 1.0 / xCount;
+    float yStep = 1.0 / yCount;
+    float xCur = sliceParams.z;
+    float yCur = sliceParams.w;
+    
+    vec2 myuv0 = vec2(0.0, 0.0);
+    myuv0.x = linear(0.0, 1.0, -.05, 1.05, uv0.x);
+    myuv0.y = linear(0.0, 1.0, -.05, 1.05, uv0.y);
+
+    float x = linear(0.0, 1.0, xCur * xStep, (xCur + 1.0) * xStep, myuv0.x);
+    float y = linear(0.0, 1.0, yCur * yStep, (yCur + 1.0) * yStep, myuv0.y);
+    vec2 sliced_uv = vec2(x, y);
+    
+    o *= CCSampleWithAlphaSeparated(cc_spriteTexture, sliced_uv);
+    
+    // 注意其中的.01可以避免移动时出现接缝         
+    float s0 = 1.0 - smoothstep(1.0 - edgeParams.x, 1.0, uv0.x - 0.01);
+    float s2 = smoothstep(0.0, edgeParams.y, uv0.x + 0.01);
+    
+    float s1 = 1.0 - smoothstep(1.0 - edgeParams.z, 1.0, uv0.y - 0.01);
+    float s3 = smoothstep(0.0, edgeParams.w, uv0.y + 0.01);
+    
+    float _alpha = s0 * s1 * s2 * s3 * 1.0;
+    float alpha = smoothstep(0.4, 0.4 + 0.04, _alpha);
+    float white = smoothstep(0.3, 0.3 + 0.04, _alpha);
+    float black = smoothstep(0.16, 0.16 + 0.04, _alpha);
+    
+    float c0 = smoothstep(1.0 - cornerParams.x, 1.0, uv0.x - 0.01);
+    float c2 = 1.0 - smoothstep(0.0, cornerParams.y, uv0.x + 0.01);
+    float c1 = smoothstep(1.0 - cornerParams.z, 1.0, uv0.y - 0.01);
+    float c3 = 1.0 - smoothstep(0.0, cornerParams.w, uv0.y + 0.01);
+    
+    float _alpha2 = c0 * c1 + c1 * c2 + c2 * c3 + c3 * c0;
+    float alpha2 = 1.0 - smoothstep(0.6, 0.6 + 0.02, _alpha2);
+    float white2 = 1.0 - smoothstep(0.7, 0.7 + 0.02, _alpha2);
+    float black2 = 1.0 - smoothstep(0.8, 0.8 + 0.02, _alpha2);
+
+    
+    float alpha_factor = min(alpha, alpha2);
+    float black_factor = min(black, black2);
+    float white_factor = min(white, white2);
+
+    // if ((uv0.x <= .03 || uv0.x >= 0.97) && (uv0.y >= .03 && uv0.y <= 0.97)) {
+    //   black_factor = 0.0;
+    // } else if ((uv0.y <= .03 || uv0.y >= 0.97) && (uv0.x >= .03 && uv0.x <= 0.97)) {
+    //   black_factor = 0.0;
+    // }
+
+    if (uv0.x <= 0.03 || uv0.x >= 0.97 || uv0.y <= 0.03 || uv0.y >= 0.97) {
+      black_factor = 0.0;
+    }
+
+    o.a = black_factor;
+
+    vec3 edgeColor = mix(vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), white_factor);
+
+    o.rgb = mix(edgeColor, o.rgb, alpha_factor);
+    
+    #if IS_GRAY
+      float gray = 0.2126 * o.r + 0.7152 * o.g + 0.0722 * o.b;
+      o.r = o.g = o.b = gray;
+    #endif
+  #endif
+  
+  o *= color;
+  ALPHA_TEST(o);
+  return o;
+}
+}%
