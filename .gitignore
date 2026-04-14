@@ -6,7 +6,7 @@ profiles/
 
 # === 构建输出 ===
 build/
-log/
+# log/
 
 # === Node.js 依赖 ===
 node_modules/
